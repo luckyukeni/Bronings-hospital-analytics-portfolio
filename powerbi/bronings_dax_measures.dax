@@ -1,0 +1,243 @@
+// =====================================================================
+// Bronings University Hospital Group — Phase 6 Power BI
+// File   : 03_powerbi_dax_measures.dax
+// Author : Lucky Ukeni, Advanced Healthcare Data Analyst
+// Source : Snowflake BRONINGS_ANALYTICS.HOSPITAL_OPERATIONS (cleaned VW_ views)
+// ---------------------------------------------------------------------
+// SETUP (do this before pasting the measures)
+// 1. Get Data > Snowflake. Server: <account>.snowflakecomputing.com
+//    Warehouse: BRONINGS_WH. Mode: DirectQuery (live) or Import.
+// 2. Navigator > BRONINGS_ANALYTICS > HOSPITAL_OPERATIONS. Tick the VIEWS only:
+//    VW_OUTPATIENT, VW_INPATIENT, VW_ED, VW_THEATRE, VW_WORKFORCE,
+//    VW_BED_CENSUS, VW_FINANCE_MONTHLY, KPI_TARGETS.
+// 3. Rename the queries (double-click the name in the Fields pane) so the
+//    measures below work exactly as specified:
+//      VW_OUTPATIENT      -> OutpatientAppointments
+//      VW_INPATIENT       -> InpatientAdmissions
+//      VW_ED              -> EDAttendances
+//      VW_THEATRE         -> TheatreUtilisation
+//      VW_WORKFORCE       -> WorkforceStaffing
+//      VW_FINANCE_MONTHLY -> Finance
+//      VW_BED_CENSUS      -> BedCensus
+//    Snowflake column names arrive in UPPER CASE; DAX names are not
+//    case-sensitive, so InpatientAdmissions[Episode_ID] finds EPISODE_ID.
+// 4. Check data types: all *_DATE / MONTH_START columns = Date;
+//    NHS_NUMBER = Text (never Whole Number — it drops the leading zero).
+// 5. Create an empty table "Measures" (Enter data > OK) and add every
+//    measure to it, so they are all in one place for the screenshot.
+//
+// WHY THE FIGURES MATCH THE SIGNED-OFF KPI FRAMEWORK
+// The measures use the exact required formulas. The data cleaning is done
+// once, in the Snowflake views, not in DAX:
+//  - DNA: 'attended' -> ATT, 'N/A' -> blank, so IN {"ATT","DNA","CAN","REF"}
+//    gives the agreed 13.1%.
+//  - RTT: a pathway with no recorded RTT clock (APT-100200) has RTT_Status
+//    blank, so the measure gives 41.98% (131 measurable open pathways).
+//  - Readmission: Readmission_Flag carries the 44 blank flags back-filled
+//    with the 30-day rule (Framework KPI 11) -> 10.25%.
+//    The untouched EHR value is in Readmission_Flag_Original.
+//  - Theatre: apply the page filter Theatre_ID in T1, T2, T3 (elective) so
+//    measure 7 is the Framework's sessions-based headline (TU-S).
+//
+// Expected values on the full Q1 2025 data are shown after each measure.
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// 1. Running Total — Cumulative Admissions
+//    Page: Capacity (line chart, X = Admission_Date)
+//    Expected: 1,200 at 20/03/2025 (duplicate Episode_IDs already removed)
+// ---------------------------------------------------------------------
+Cumulative Admissions =
+CALCULATE (
+    COUNT ( InpatientAdmissions[Episode_ID] ),
+    FILTER (
+        ALL ( InpatientAdmissions[Admission_Date] ),
+        InpatientAdmissions[Admission_Date] <= MAX ( InpatientAdmissions[Admission_Date] )
+    )
+)
+
+
+// ---------------------------------------------------------------------
+// 2. Rolling 12-Week Average — Waiting Time
+//    Page: Outpatient Waiting (line chart, X = Appointment_Date)
+//    Waiting_Days is the validated column (text values recovered, negatives removed)
+//    Expected: ~90 days at 21/03/2025
+// ---------------------------------------------------------------------
+Rolling 12Wk Avg Wait =
+AVERAGEX (
+    DATESINPERIOD (
+        OutpatientAppointments[Appointment_Date],
+        LASTDATE ( OutpatientAppointments[Appointment_Date] ),
+        -84,
+        DAY
+    ),
+    CALCULATE ( AVERAGE ( OutpatientAppointments[Waiting_Days] ) )
+)
+
+
+// ---------------------------------------------------------------------
+// 3. YTD Variance — Budget vs Actual   (Finance measures table = Finance)
+//    Financial year ends 31 March. Positive = overspend.
+//    Actual = confirmed agency shifts x £385. Budget = 8% target share of
+//    shifts x £385 (interim, target-based) until the Finance ledger is loaded.
+//    Expected (Jan–2 Mar 2025): Actual £97,020 – Budget £47,309 = +£49,711
+// ---------------------------------------------------------------------
+Actual Spend YTD =
+TOTALYTD ( SUM ( Finance[ACTUAL_SPEND_GBP] ), Finance[MONTH_START], "31/3" )
+
+Budget YTD =
+TOTALYTD ( SUM ( Finance[BUDGET_GBP] ), Finance[MONTH_START], "31/3" )
+
+YTD Variance =
+[Actual Spend YTD] - [Budget YTD]
+
+YTD Variance % =
+DIVIDE ( [YTD Variance], [Budget YTD] ) * 100
+
+
+// ---------------------------------------------------------------------
+// 4. Occupancy % = Beds Used / Beds Available × 100
+//    Counts episodes still open (no discharge date) against the 380-bed base.
+//    Expected: 8.16% (31 open episodes ÷ 380)
+//    CAVEAT for the Board: the extract is not the Trust's full inpatient
+//    activity, and some of the 31 open episodes date from October 2024
+//    (likely missing discharges). Label the tile "Open episodes ÷ 380 beds".
+// ---------------------------------------------------------------------
+Occupancy % =
+DIVIDE (
+    COUNTROWS ( FILTER ( InpatientAdmissions, ISBLANK ( InpatientAdmissions[Discharge_Date] ) ) ),
+    380
+) * 100
+
+
+// ---------------------------------------------------------------------
+// 5. DNA Rate %   — Framework KPI 3: DNA / (ATT + DNA + CAN + REF) × 100
+//    Expected: 13.13% → displays 13.1%
+// ---------------------------------------------------------------------
+DNA Rate % =
+DIVIDE (
+    COUNTROWS ( FILTER ( OutpatientAppointments, OutpatientAppointments[Attendance_Status] = "DNA" ) ),
+    COUNTROWS ( FILTER ( OutpatientAppointments, OutpatientAppointments[Attendance_Status] IN { "ATT", "DNA", "CAN", "REF" } ) )
+) * 100
+
+
+// ---------------------------------------------------------------------
+// 6. Readmission Rate %   — Framework KPI 11 (blank flags back-filled in Snowflake)
+//    Expected: 10.25% (123 of 1,200) — breaches the 10% target
+// ---------------------------------------------------------------------
+Readmission Rate % =
+DIVIDE (
+    COUNTROWS ( FILTER ( InpatientAdmissions, InpatientAdmissions[Readmission_Flag] = "Y" ) ),
+    COUNTROWS ( FILTER ( InpatientAdmissions, InpatientAdmissions[Readmission_Flag] IN { "Y", "N" } ) )
+) * 100
+
+
+// ---------------------------------------------------------------------
+// 7. Theatre Utilisation % (Sessions-Based)
+//    With page filter Theatre_ID = T1, T2, T3 (Framework TU-S headline): 65.70%
+//    Without the filter (all theatres incl. T4 emergency): 70.75%
+//    Board-reported figure for the same definition: 64.2%
+// ---------------------------------------------------------------------
+Theatre Util % =
+DIVIDE ( SUM ( TheatreUtilisation[Sessions_Used] ), SUM ( TheatreUtilisation[Sessions_Available] ) ) * 100
+
+
+// ---------------------------------------------------------------------
+// 8. RTT Compliance %
+//    Expected: 41.98% (55 of 131 open pathways) vs 92% standard
+// ---------------------------------------------------------------------
+RTT Compliance % =
+DIVIDE (
+    COUNTROWS ( FILTER ( OutpatientAppointments, OutpatientAppointments[RTT_Status] = "OPEN" && OutpatientAppointments[RTT_Weeks] <= 18 ) ),
+    COUNTROWS ( FILTER ( OutpatientAppointments, OutpatientAppointments[RTT_Status] = "OPEN" ) )
+) * 100
+
+
+// ---------------------------------------------------------------------
+// 9. Average Length of Stay (ALOS)
+//    Length_of_Stay is recalculated from dates in Snowflake (no negatives);
+//    open episodes are blank and AVERAGEX skips blanks.
+//    Expected: 3.88 days vs 4.5-day target
+// ---------------------------------------------------------------------
+ALOS =
+AVERAGEX (
+    FILTER ( InpatientAdmissions, InpatientAdmissions[Length_of_Stay] >= 0 ),
+    InpatientAdmissions[Length_of_Stay]
+)
+
+
+// ---------------------------------------------------------------------
+// 10. Target Achievement Flag (RAG)
+//    Expected: "Red" (RTT 41.98%)
+// ---------------------------------------------------------------------
+RAG Status =
+IF ( [RTT Compliance %] >= 92, "Green", IF ( [RTT Compliance %] >= 80, "Amber", "Red" ) )
+
+// Colour helper for conditional formatting (Format > Background > Field value)
+RAG Colour =
+SWITCH ( [RAG Status], "Green", "#009639", "Amber", "#FFB81C", "Red", "#DA291C", "#768692" )
+
+
+// ---------------------------------------------------------------------
+// 11. Agency Spend %   (ST-99 test records already excluded in Snowflake)
+//    Expected: 16.57% (252 of 1,521 shifts with a known flag)
+// ---------------------------------------------------------------------
+Agency Spend % =
+DIVIDE (
+    COUNTROWS ( FILTER ( WorkforceStaffing, WorkforceStaffing[Agency_Flag] = "Y" ) ),
+    COUNTROWS ( FILTER ( WorkforceStaffing, WorkforceStaffing[Agency_Flag] IN { "Y", "N" } ) )
+) * 100
+
+
+// ---------------------------------------------------------------------
+// 12. Waiting List Forecast (12 weeks)
+//    No DAX — built in the Analytics pane. Steps:
+//    a) Outpatient page > Line chart. X axis = OutpatientAppointments[WEEK_START]
+//       (set to Continuous, not Categorical). Y axis = [Open Pathways] below.
+//    b) Analytics pane (magnifying glass icon) > Forecast > Add.
+//       Forecast length = 12, Units = Points, Confidence = 95%,
+//       Seasonality = Auto. Apply.
+//    c) Title: "Waiting list (open RTT pathways) — 12-week forecast".
+//    Note: only ~11 weeks of history exist (Jan–Mar 2025), so the forecast
+//    band is wide; state this in the visual's subtitle.
+// ---------------------------------------------------------------------
+Open Pathways =
+CALCULATE ( COUNTROWS ( OutpatientAppointments ), OutpatientAppointments[RTT_Status] = "OPEN" )
+
+
+// =====================================================================
+// SUPPORTING MEASURES (not in the required 12 — used on the pages)
+// =====================================================================
+
+// ED page — Framework KPI 1 (calculated from times, not the manual flag)
+ED 4hr Compliance % =
+DIVIDE (
+    SUM ( EDAttendances[HAS_DEPARTURE] ) - SUM ( EDAttendances[IS_4HR_BREACH] ),
+    SUM ( EDAttendances[HAS_DEPARTURE] )
+) * 100                                                    // expected 83.1%
+
+LWBS Rate % =
+DIVIDE ( SUM ( EDAttendances[IS_LWBS] ), COUNTROWS ( EDAttendances ) ) * 100   // 2.40%
+
+// Theatre — Finance hours view (secondary, labelled, not benchmarked)
+Theatre Hours Util % =
+DIVIDE (
+    SUM ( TheatreUtilisation[MINUTES_USED_INCL_OVERRUN] ),
+    SUM ( TheatreUtilisation[MINUTES_SCHEDULED] )
+) * 100                                                    // 72.38% all theatres
+
+// Capacity — daily occupancy trend for the 85% / 92% reference lines
+Occupancy % (Census) =
+DIVIDE ( SUM ( BedCensus[PATIENTS_IN_BED] ), 380 ) * 100
+
+// Workforce
+Agency Cost £ =
+SUM ( WorkforceStaffing[IS_AGENCY] ) * 385                 // £97,020
+
+WTR Breaches =
+SUM ( WorkforceStaffing[IS_WTR_BREACH] )                   // 8 shifts over 13 hours
+
+// Finance
+HRG Income at Risk £ =
+SUM ( InpatientAdmissions[IS_HRG_BLANK] ) * 1850           // £51,800
