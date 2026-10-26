@@ -1,0 +1,67 @@
+TABLEAU PUBLIC – CALCULATED FIELDS (using Tableau's friendly column names)
+Tableau renamed the CSV columns, e.g. ATTENDANCE_STATUS -> [Attendance Status], RTT_WEEKS -> [Rtt Weeks].
+How: make sure the right data source is selected (top of the Data pane) > Analysis > Create Calculated Field >
+type the NAME in the top box > paste the FORMULA > OK.
+Tip: if a field name turns red, delete it, type [ and pick the field from the drop-down list.
+
+=== Data source: VW_OUTPATIENT ===
+Name: DNA Rate %
+SUM(IIF([Attendance Status]='DNA',1,0))
+/ SUM(IIF([Attendance Status]='ATT' OR [Attendance Status]='DNA' OR [Attendance Status]='CAN' OR [Attendance Status]='REF',1,0)) * 100
+(expect 13.13)
+
+Name: RTT Compliance %
+SUM(IIF([Rtt Status]='OPEN' AND [Rtt Weeks]<=18,1,0)) / SUM(IIF([Rtt Status]='OPEN',1,0)) * 100
+(expect 41.98)
+
+Name: RAG Status
+IF [RTT Compliance %] >= 92 THEN 'Green' ELSEIF [RTT Compliance %] >= 80 THEN 'Amber' ELSE 'Red' END
+(expect Red)
+
+Name: Open Pathways
+SUM(IIF([Rtt Status]='OPEN',1,0))
+(expect 131)
+
+Name: Rolling 12Wk Avg Wait
+WINDOW_AVG(AVG([Waiting Days]), -83, 0)
+(use with Appointment Date as exact date, continuous; ends about 90)
+
+=== Data source: VW_ED ===
+Name: ED 4hr Compliance %
+(SUM([Has Departure]) - SUM([Is 4Hr Breach])) / SUM([Has Departure]) * 100
+(expect 83.1)
+
+=== Data source: VW_INPATIENT ===
+Name: Readmission Rate %
+SUM(IIF([Readmission Flag]='Y',1,0)) / SUM(IIF([Readmission Flag]='Y' OR [Readmission Flag]='N',1,0)) * 100
+(expect 10.25)
+
+Name: ALOS
+AVG(IIF([Length Of Stay]>=0,[Length Of Stay],NULL))
+(expect 3.88)
+
+Name: Occupancy %
+SUM(IIF(ISNULL([Discharge Date]),1,0)) / 380 * 100
+(expect 8.16)
+
+Name: Cumulative Admissions
+RUNNING_SUM(COUNTD([Episode Id]))
+(use with Admission Date continuous; ends 1,200)
+
+=== Data source: VW_THEATRE ===
+Name: Theatre Util %
+SUM([Sessions Used]) / SUM([Sessions Available]) * 100
+(70.75 all theatres; 65.7 with Theatre Id filter T1, T2, T3)
+
+=== Data source: VW_WORKFORCE ===
+Name: Agency Spend %
+SUM(IIF([Agency Flag]='Y',1,0)) / SUM(IIF([Agency Flag]='Y' OR [Agency Flag]='N',1,0)) * 100
+(expect 16.57)
+
+=== Data source: VW_FINANCE_MONTHLY ===
+Name: Actual Spend YTD   ->  RUNNING_SUM(SUM([Actual Spend Gbp]))
+Name: Budget YTD         ->  RUNNING_SUM(SUM([Budget Gbp]))
+Name: YTD Variance       ->  [Actual Spend YTD] - [Budget YTD]
+(use with Month Start on Columns; final value 49,711)
+
+Format each % field: right-click the field > Default Properties > Number Format > Number (Custom) > 1 decimal > Suffix: %
